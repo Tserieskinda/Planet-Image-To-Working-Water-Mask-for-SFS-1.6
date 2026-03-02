@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Planet → Sea Graph</title>
+<style>
+body{margin:0;background:radial-gradient(circle at top,#141414,#090909);color:#eee;font-family:system-ui,sans-serif;text-align:center}
+h3{margin:10px 0 4px}
+canvas{display:block;margin:10px auto 150px;max-width:100%;background:#000;border-radius:10px;box-shadow:0 0 0 1px #222,0 10px 40px #000;touch-action:none}
+#controls{position:fixed;bottom:0;width:100%;background:linear-gradient(#141414,#0b0b0b);padding:10px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+button{padding:10px 14px;border:none;border-radius:10px;background:#2b2b2b;color:#fff}
+button.active{background:#1f78ff}
+button.secondary{background:#444}
+label{display:flex;align-items:center;gap:6px;font-size:13px}
+input[type=range]{width:120px}
+#stats{font-size:13px;opacity:.85}
+#genStatus{font-size:12px;opacity:0;transition:opacity .15s}
+</style>
+</head>
+<body>
+
+<h3>Planet → Sea Graph</h3>
+<p style="margin:4px 0 10px; font-size:13px; opacity:.85">Use only Cropped-Square Planet Images</p>
+<input type="file" id="upload" accept="image/*">
+
+<div id="stats">Water: <span id="ls">0</span> | Land: <span id="gs">0</span></div>
+<div id="genStatus">generating…</div>
+
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+  <button id="liq" class="active">Water</button>
+  <button id="land">Land</button>
+  <button id="gen">Generate</button>
+  <button id="dl" class="secondary">Download</button>
+  <button id="pen">Pen</button>
+  <button id="erase" class="secondary">Erase</button>
+  <label>Opacity <input type="range" id="opacity" min="0" max="100" value="100"></label>
+  <label>Size <input type="range" id="psize" min="1" max="20" value="4"></label>
+  <button id="black" class="active">Black</button>
+  <button id="white">White</button>
+  <label>Depth <input type="range" id="depth" min="80" max="360" value="200"></label>
+  <label>Contrast <input type="range" id="contrast" min="60" max="160" value="110"></label>
+  <label>Coast <input type="range" id="coast" min="5" max="120" value="40"></label>
+  <label>Spread <input type="range" id="spread" min="0.3" max="3" step="0.1" value="1.2"></label>
+  <label><input type="checkbox" id="terrainCircle"> Terrain Circle</label>
+</div>
+
+<script>
+const opacitySlider=document.getElementById("opacity");
+const penBtn=document.getElementById("pen");
+const eraseBtn=document.getElementById("erase");
+const psize=document.getElementById("psize");
+const blackBtn=document.getElementById("black");
+const whiteBtn=document.getElementById("white");
+let drawing=false,penMode=false,eraseMode=false,penColor=0;
+const canvas=document.getElementById("canvas");
+const ctx=canvas.getContext("2d");
+const upload=document.getElementById("upload");
+const liqBtn=document.getElementById("liq");
+const landBtn=document.getElementById("land");
+const genBtn=document.getElementById("gen");
+const dlBtn=document.getElementById("dl");
+const depth=document.getElementById("depth");
+const contrast=document.getElementById("contrast");
+const coast=document.getElementById("coast");
+const spread=document.getElementById("spread");
+const ls=document.getElementById("ls");
+const gs=document.getElementById("gs");
+const genStatus=document.getElementById("genStatus");
+const terrainCircleToggle=document.getElementById("terrainCircle");
+let terrainCircleEnabled=false;
+terrainCircleToggle.onchange=()=>{terrainCircleEnabled=terrainCircleToggle.checked;renderFinal();};
+let baseImage,generated,contrastBase,editLayer=null,seaField,seaMask,coastDist;
+let liquidSamples=[],landSamples=[],mode="liq";
+const showGen=()=>genStatus.style.opacity=".85";
+const hideGen=()=>genStatus.style.opacity="0";
+function rgb2lab([r,g,b]){r/=255;g/=255;b/=255;r=r>0.04045?((r+0.055)/1.055)**2.4:r/12.92;g=g>0.04045?((g+0.055)/1.055)**2.4:g/12.92;b=b>0.04045?((b+0.055)/1.055)**2.4:b/12.92;let x=(r*0.4124+g*0.3576+b*0.1805)/0.95047;let y=(r*0.2126+g*0.7152+b*0.0722);let z=(r*0.0193+g*0.1192+b*0.9505)/1.08883;x=x>0.008856?Math.cbrt(x):(7.787*x+16/116);y=y>0.008856?Math.cbrt(y):(7.787*y+16/116);z=z>0.008856?Math.cbrt(z):(7.787*z+16/116);return[500*(x-y),200*(y-z)];}
+const avg=a=>a[0].map((_,i)=>a.reduce((s,p)=>s+p[i],0)/a.length);
+const dist=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+liqBtn.onclick=()=>{mode="liq";liqBtn.classList.add("active");landBtn.classList.remove("active");};
+landBtn.onclick=()=>{mode="land";landBtn.classList.add("active");liqBtn.classList.remove("active");};
+penBtn.onclick=()=>{penMode=!penMode;eraseMode=false;penBtn.classList.toggle("active");eraseBtn.classList.remove("active");};
+eraseBtn.onclick=()=>{eraseMode=!eraseMode;penMode=false;eraseBtn.classList.toggle("active");penBtn.classList.remove("active");};
+blackBtn.onclick=()=>{penColor=0;blackBtn.classList.add("active");whiteBtn.classList.remove("active");};
+whiteBtn.onclick=()=>{penColor=255;whiteBtn.classList.add("active");blackBtn.classList.remove("active");};
+upload.onchange=e=>{const img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const s=Math.min(innerWidth/img.naturalWidth,1);canvas.style.width=img.naturalWidth*s+"px";canvas.style.height=img.naturalHeight*s+"px";ctx.drawImage(img,0,0);baseImage=ctx.getImageData(0,0,canvas.width,canvas.height);liquidSamples=[];landSamples=[];ls.textContent=gs.textContent="0";};img.src=URL.createObjectURL(e.target.files[0]);};
+canvas.onclick=e=>{if(!baseImage||penMode||eraseMode)return;const r=canvas.getBoundingClientRect();const x=(e.clientX-r.left)*canvas.width/r.width;const y=(e.clientY-r.top)*canvas.height/r.height;const i=(Math.floor(y)*canvas.width+Math.floor(x))*4;const ab=rgb2lab(baseImage.data.slice(i,i+3));ctx.fillStyle=mode==="liq"?"#00aaff":"#ffaa00";ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();if(mode==="liq"){liquidSamples.push(ab);ls.textContent=liquidSamples.length;}else{landSamples.push(ab);gs.textContent=landSamples.length;}};
+function computeCoastDistance(){const w=canvas.width,h=canvas.height;coastDist=new Float32Array(w*h);for(let i=0;i<w*h;i++)coastDist[i]=seaMask[i]?Infinity:0;for(let y=0;y<h;y++){for(let x=0;x<w;x++){const i=y*w+x;if(i===0)continue;const a=x>0?coastDist[i-1]+1:Infinity;const b=y>0?coastDist[i-w]+1:Infinity;coastDist[i]=Math.min(coastDist[i],a,b);}}for(let y=h-1;y>=0;y--){for(let x=w-1;x>=0;x--){const i=y*w+x;const a=x<w-1?coastDist[i+1]+1:Infinity;const b=y<h-1?coastDist[i+w]+1:Infinity;coastDist[i]=Math.min(coastDist[i],a,b);}}}
+genBtn.onclick=()=>{if(!baseImage||!liquidSamples.length||!landSamples.length)return;showGen();requestAnimationFrame(()=>{const la=avg(liquidSamples),lb=avg(landSamples);const w=canvas.width,h=canvas.height;seaField=new Float32Array(w*h);seaMask=new Uint8Array(w*h);const src=baseImage.data;for(let i=0,p=0;i<src.length;i+=4,p++){const ab=rgb2lab([src[i],src[i+1],src[i+2]]);const v=(dist(ab,lb)-dist(ab,la))/(dist(ab,lb)+dist(ab,la));seaField[p]=v;seaMask[p]=v>0?1:0;}computeCoastDistance();applyDepth();hideGen();});};
+function applyDepth(){if(!seaField)return;const w=canvas.width,h=canvas.height;generated=ctx.createImageData(w,h);editLayer=ctx.createImageData(w,h);const d=editLayer.data;for(let i=0;i<d.length;i+=4){d[i]=0;d[i+1]=0;d[i+2]=0;d[i+3]=0;}const shallow=220,deep=10;const cw=+coast.value,sp=+spread.value;for(let i=0,p=0;i<generated.data.length;i+=4,p++){if(!seaMask[p]){generated.data[i]=generated.data[i+1]=generated.data[i+2]=255;}else{let t=Math.min(1,coastDist[p]/cw);t=Math.pow(t,sp);t=t*t*(3-2*t);const v=shallow*(1-t)+deep*t;generated.data[i]=generated.data[i+1]=generated.data[i+2]=v;}generated.data[i+3]=255;}contrastBase=new ImageData(new Uint8ClampedArray(generated.data),w,h);applyContrast();}
+function applyContrast(){if(!contrastBase)return;const src=contrastBase.data,dst=generated.data;let min=255,max=0;for(let i=0;i<src.length;i+=4){if(src[i]!==255){min=Math.min(min,src[i]);max=Math.max(max,src[i]);}}if(max-min<5){ctx.putImageData(generated,0,0);return;}const f=contrast.value/100;for(let i=0;i<dst.length;i+=4){if(src[i]===255){dst[i]=dst[i+1]=dst[i+2]=255;continue;}let n=(src[i]-min)/(max-min);n=Math.pow(n,1/f);dst[i]=dst[i+1]=dst[i+2]=min+n*(max-min);}renderFinal();}
+let pending=null;function queue(fn){pending=fn;showGen();}
+function flush(){if(pending){requestAnimationFrame(()=>{pending();pending=null;hideGen();});}}
+[depth,contrast,coast,spread].forEach(s=>{s.addEventListener("input",()=>queue(applyDepth));s.addEventListener("pointerup",flush);s.addEventListener("change",flush);});
+function drawAt(e){if(!generated)return;const r=canvas.getBoundingClientRect();const x=Math.floor((e.clientX-r.left)*canvas.width/r.width);const y=Math.floor((e.clientY-r.top)*canvas.height/r.height);const radius=+psize.value;const alpha=opacitySlider.value/100;const d=editLayer.data;for(let dy=-radius;dy<=radius;dy++){for(let dx=-radius;dx<=radius;dx++){if(dx*dx+dy*dy>radius*radius)continue;const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=canvas.width||ny>=canvas.height)continue;const i=(ny*canvas.width+nx)*4;if(eraseMode){d[i+3]=0;}else if(penMode){const current=generated.data[i];const blended=current*(1-alpha)+penColor*alpha;d[i]=d[i+1]=d[i+2]=blended;d[i+3]=255;}}}renderFinal();}
+canvas.addEventListener("pointerdown",e=>{if(penMode||eraseMode){drawing=true;drawAt(e);}});
+canvas.addEventListener("pointermove",e=>{if(drawing)drawAt(e);});
+window.addEventListener("pointerup",()=>drawing=false);
+dlBtn.onclick=()=>{
+  const off=document.createElement("canvas");
+  off.width=canvas.width; off.height=canvas.height;
+  const octx=off.getContext("2d");
+  octx.drawImage(canvas,0,0);
+  if(terrainCircleEnabled){
+    const cx=off.width/2, cy=off.height/2;
+    const radius=Math.min(off.width,off.height)/2-1;
+    const img=octx.getImageData(0,0,off.width,off.height);
+    const d=img.data, w=off.width, h=off.height;
+    for(let y=0;y<h;y++){
+      for(let x=0;x<w;x++){
+        const dx=x-cx, dy=y-cy;
+        if(Math.sqrt(dx*dx+dy*dy)>radius){
+          const i=(y*w+x)*4;
+          d[i]=d[i+1]=d[i+2]=255;
+        }
+      }
+    }
+    octx.putImageData(img,0,0);
+  }
+  off.toBlob(b=>{
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(b);
+    a.download="sea-map.png";
+    a.click();
+  });
+};
+function renderFinal(){
+  if(!generated) return;
+  const w=canvas.width, h=canvas.height;
+  const preview=ctx.createImageData(w,h);
+  const terrain=generated.data;
+  const edits=editLayer.data;
+  const out=preview.data;
+
+  for(let i=0;i<terrain.length;i+=4){
+    let v=terrain[i];
+    if(edits[i+3]===255) v=edits[i];
+    out[i]=out[i+1]=out[i+2]=v;
+    out[i+3]=255;
+  }
+
+  ctx.putImageData(preview,0,0);
+
+  // 🔵 VISUAL TERRAIN CIRCLE OVERLAY (preview only)
+  if(terrainCircleEnabled){
+    const cx=w/2, cy=h/2;
+    const radius=Math.min(w,h)/2-1;
+
+    ctx.save();
+    ctx.strokeStyle="rgba(0,0,0,0.9)";
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.arc(cx,cy,radius,0,Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+</script>
+
+</body>
+</html>
